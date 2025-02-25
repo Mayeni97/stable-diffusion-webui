@@ -1,0 +1,1 @@
+conda run -n sd-webui python launch.py --skip-torch-cuda-test --use-cpu all --skip-prepare-environment

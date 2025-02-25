@@ -117,6 +117,11 @@ fp8: bool = False
 # Force fp16 for all models in inference. No casting during inference.
 # This flag is controlled by "--precision half" command line arg.
 force_fp16: bool = False
+dtype: torch.dtype = torch.float32  # Changed from float16 to float32 for CPU compatibility
+dtype_vae: torch.dtype = torch.float32  # Changed from float16 to float32 for CPU compatibility
+dtype_unet: torch.dtype = torch.float32  # Changed from float16 to float32 for CPU compatibility
+dtype_inference: torch.dtype = torch.float32  # Changed from float16 to float32 for CPU compatibility
+unet_needs_upcast = False
 device: torch.device = None
 device_interrogate: torch.device = None
 device_gfpgan: torch.device = None
@@ -151,26 +156,36 @@ patch_module_list = [
 
 def manual_cast_forward(target_dtype):
     def forward_wrapper(self, *args, **kwargs):
+        current_dtype = target_dtype
+
+        # Force float32 on CPU for half precision tensors to avoid "addmm_impl_cpu_" error
+        if device == cpu and (target_dtype == torch.float16 or target_dtype == torch.bfloat16):
+            current_dtype = torch.float32
+
+        # Force LayerNorm to use float32 on MPS device, regardless of target dtype
+        if has_mps() and isinstance(self, torch.nn.LayerNorm):
+            current_dtype = torch.float32
+
         if any(
-            isinstance(arg, torch.Tensor) and arg.dtype != target_dtype
+            isinstance(arg, torch.Tensor) and arg.dtype != current_dtype
             for arg in args
         ):
-            args = [arg.to(target_dtype) if isinstance(arg, torch.Tensor) else arg for arg in args]
-            kwargs = {k: v.to(target_dtype) if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
+            args = [arg.to(current_dtype) if isinstance(arg, torch.Tensor) else arg for arg in args]
+            kwargs = {k: v.to(current_dtype) if isinstance(v, torch.Tensor) else v for k, v in kwargs.items()}
 
-        org_dtype = target_dtype
+        org_dtype = current_dtype
         for param in self.parameters():
-            if param.dtype != target_dtype:
+            if param.dtype != current_dtype:
                 org_dtype = param.dtype
                 break
 
-        if org_dtype != target_dtype:
-            self.to(target_dtype)
+        if org_dtype != current_dtype:
+            self.to(current_dtype)
         result = self.org_forward(*args, **kwargs)
-        if org_dtype != target_dtype:
+        if org_dtype != current_dtype:
             self.to(org_dtype)
 
-        if target_dtype != dtype_inference:
+        if current_dtype != dtype_inference:
             if isinstance(result, tuple):
                 result = tuple(
                     i.to(dtype_inference)
